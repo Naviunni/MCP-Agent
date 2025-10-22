@@ -162,6 +162,8 @@ async def handle_list_events(session: ClientSession, params: dict | None = None)
     # Use LLM-provided date range, or default to today
     start_date_text = (params or {}).get("start_date")
     end_date_text = (params or {}).get("end_date")
+    if not start_date_text or not end_date_text:
+        print("⚠️ LLM did not specify a date range — defaulting to today.")
 
     if start_date_text:
         start_dt = dateparser.parse(start_date_text)
