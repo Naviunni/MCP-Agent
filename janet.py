@@ -4,6 +4,7 @@ Janet — a simple CLI assistant for Gmail MCP.
 
 from __future__ import annotations
 
+from datetime import datetime
 import os
 import json
 import asyncio
@@ -24,6 +25,7 @@ from janet_calendar import (
     handle_list_events,
     handle_delete_event,
 )
+import ollama
 
 
 
@@ -33,6 +35,12 @@ from janet_calendar import (
 
 OPENAI_MODEL: str = os.getenv("JANET_MODEL", "gpt-4o-mini")
 SENDER_NAME: str = os.getenv("JANET_SENDER_NAME", "Navya")
+# ----------------- MODEL CONFIGURATION -----------------
+USE_OLLAMA = False  # Set to True to use your local Ollama model instead of GPT-4o
+OLLAMA_MODEL = "llama3"  # or "mistral", "phi3", "codellama", etc.
+OPENAI_MODEL = "gpt-4o"  # or "gpt-4o-mini" for speed
+# -------------------------------------------------------
+
 
 
 # -------------------------
@@ -49,10 +57,12 @@ class Plan(TypedDict, total=False):
 # -------------------------
 
 def _build_system_prompt() -> str:
+    current_date = datetime.now().strftime("%Y-%m-%d")
     return (
         "You are Janet, a personal assistant for Navya that converts user requests into JSON tool calls for Gmail and Google Calendar MCP.\n\n"
         "Supported actions: send_email, draft_email, read_email, search_emails, create_event, list_events, delete_event.\n"
         f"Respond ONLY in valid JSON with no explanations. When drafting and sending emails, you may sign them as:\n\nBest, \n{SENDER_NAME}\n\n"
+        f"For context, today's date: {current_date}\n\n"
         "For create_event: include fields summary (string), start (ISO datetime), end (ISO datetime), attendees (array), and optional location.\n"
         "For list_events:\n"
             " - You must always infer the correct date range from the user query.\n"
@@ -81,20 +91,68 @@ async def interpret_intent(user_text: str) -> Optional[Plan]:
     """Use the OpenAI model — return None if invalid."""
     from openai import AsyncOpenAI  # lazy import to avoid hard dependency at import time
 
-    client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    resp = await client.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": _build_system_prompt()},
-            {"role": "user", "content": user_text},
-        ],
-    )
+    # client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    # resp = await client.chat.completions.create(
+    #     model=OPENAI_MODEL,
+    #     temperature=0,
+    #     messages=[
+    #         {"role": "system", "content": _build_system_prompt()},
+    #         {"role": "user", "content": user_text},
+    #     ],
+    # )
+    # try:
+    #     content = resp.choices[0].message.content
+    #     return json.loads(content) if content else None
+    # except Exception:
+    #     print("I couldn't interpret that request. Try rephrasing.")
+    #     return None
+    system_prompt = _build_system_prompt()
+    user_input = user_text
+    if USE_OLLAMA:
+        # --- Local LLM path (Ollama) ---
+        try:
+            print(f"🧠 Using local Ollama model: {OLLAMA_MODEL}")
+            response = ollama.chat(
+                model=OLLAMA_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_input},
+                ],
+            )
+            content = response["message"]["content"].strip()
+        except Exception as e:
+            print("⚠️ Ollama error:", e)
+            return None
+    else:
+        # --- OpenAI GPT path ---
+        print(f"🧠 Using OPENAI model: {OPENAI_MODEL}")
+        client = AsyncOpenAI()
+        try:
+            completion = await client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_input},
+                ],
+                temperature=0,
+            )
+            content = completion.choices[0].message.content.strip()
+        except Exception as e:
+            print("⚠️ OpenAI error:", e)
+            return None
+
+    # --- Try to extract valid JSON ---
     try:
-        content = resp.choices[0].message.content
-        return json.loads(content) if content else None
+        # handle extra text around JSON
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end != -1:
+            content = content[start:end+1]
+        plan = json.loads(content)
+        return plan
     except Exception:
-        print("I couldn't interpret that request. Try rephrasing.")
+        print("Couldn't parse model output as JSON:")
+        print(content)
         return None
 
 
@@ -130,6 +188,11 @@ async def main() -> None:
                     text = input("\nYou (or 'quit'): ").strip()
                     if text.lower() in {"quit", "exit"}:
                         break
+                    if text.lower().startswith("switch model"):
+                        global USE_OLLAMA
+                        USE_OLLAMA = not USE_OLLAMA
+                        print(f"🔁 Switched to {'Ollama (local)' if USE_OLLAMA else 'GPT-4o (OpenAI)'}")
+                        continue
 
                     plan = await interpret_intent(text)
                     print("🧩 LLM output:", json.dumps(plan, indent=2))
