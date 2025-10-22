@@ -49,10 +49,10 @@ async def interpret_intent(user_text: str) -> dict | None:
     client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
     system_prompt = (
-    "You are Janet, an assistant that converts user requests into JSON tool calls "
+    "You are Janet, a personnal assistant for Navya that converts user requests into JSON tool calls "
     "for Gmail MCP.\n\n"
     "Supported actions: send_email, draft_email, read_email, search_emails.\n"
-    "Respond ONLY in valid JSON with no explanations.\n\n"
+    "Respond ONLY in valid JSON with no explanations. When drafting and sending emails, you may sign them as:\n\nBest, \nNavya\n\n"
     "For send_email: include {\"to\": [emails], \"subject\": string, \"body\": string}.\n"
     "For search_emails: always include a Gmail-style query string that uses fields like "
     "'from:', 'to:', 'subject:', or quoted keywords. Example:\n"
@@ -156,6 +156,29 @@ async def handle_search_and_read(session: ClientSession, params: dict):
     read_result = await session.call_tool("read_email", arguments={"messageId": msg_id})
     content = read_result.content[0].text if read_result.content else None
     print("\n--- Email Content ---\n", content or "(no content)")
+async def handle_draft_email(session: ClientSession, params: dict):
+    """Create a draft email in Gmail via MCP."""
+    missing = [f for f in ("to", "subject", "body") if f not in params or not params[f]]
+    if missing:
+        print(f"❌ Missing required field(s): {', '.join(missing)}. Please rephrase your request.")
+        return
+
+    if isinstance(params["to"], str):
+        params["to"] = [params["to"]]
+
+    print("\n--- Draft Preview ---")
+    print("To:", ", ".join(params["to"]))
+    print("Subject:", params["subject"])
+    print("Body:\n", params["body"])
+    confirm = input("Save this draft? [y/N] ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+
+    result = await session.call_tool("draft_email", arguments=params)
+    text = result.content[0].text if result.content else str(result)
+    print("📝 Draft created:", text)
+
 
 async def main():
     server = StdioServerParameters(
@@ -206,9 +229,10 @@ async def main():
                         continue
                     res = await session.call_tool("read_email", arguments={"messageId": msg_id})
                     print(res.content[0].text if res.content else res)
-
+                elif action == "draft_email":
+                    await handle_draft_email(session, params)
                 else:
-                    print("⚠️ I didn’t understand that command.")
+                    print("I didn’t understand that command.")
 
 
                 # plan = await interpret_intent(text)
