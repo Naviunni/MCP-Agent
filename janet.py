@@ -59,8 +59,9 @@ async def interpret_intent(user_text: str) -> dict | None:
     "  User: check if I got a reply from alice@example.com about the meeting\n"
     "  → {\"action\": \"search_emails\", \"params\": {\"query\": \"from:alice@example.com subject:meeting\"}}\n"
     "If unsure, include both 'from:<address>' and main topic words.\n"
-    "If not enough information is given, respond with:\n"
-    "  {\"action\": \"invalid\", \"reason\": \"Missing address or topic\"}"
+    "If key details (like recipient, subject, query) are missing, leave them empty in the JSON so that the user can be asked interactively.\n"
+    # "If not enough information is given, respond with:\n"
+    # "  {\"action\": \"invalid\", \"reason\": \"Missing address or topic\"}"
     )
 
     resp = await client.chat.completions.create(
@@ -179,6 +180,42 @@ async def handle_draft_email(session: ClientSession, params: dict):
     text = result.content[0].text if result.content else str(result)
     print("📝 Draft created:", text)
 
+async def clarify_missing_fields(plan: dict) -> dict | None:
+    """Ask the user for missing fields and return an updated plan dict."""
+    action = plan.get("action")
+    params = plan.get("params", {})
+    missing = []
+
+    if action == "send_email":
+        for f in ("to", "subject", "body"):
+            if f not in params or not params[f]:
+                missing.append(f)
+    elif action == "search_emails":
+        if "query" not in params or not params["query"]:
+            missing.append("query")
+
+    if not missing:
+        return plan  # complete
+
+    print(f"🤔 I’m missing some information: {', '.join(missing)}.")
+    follow = input("Could you provide it now? (or 'yes' or 'cancel') ").strip()
+    if follow.lower() in {"cancel", "quit", "exit"}:
+        print("Okay, cancelled this request.")
+        return None
+
+    # Patch values directly
+    for f in missing:
+        val = input(f"Please enter {f}: ").strip()
+        if not val:
+            print("Still incomplete; cancelling.")
+            return None
+        if f == "to":
+            params[f] = [val]
+        else:
+            params[f] = val
+
+    plan["params"] = params
+    return plan
 
 async def main():
     server = StdioServerParameters(
@@ -208,6 +245,11 @@ async def main():
                 if action == "invalid":
                     print(f"❌ {plan.get('reason', 'I could not extract enough information.')}")
                     continue
+                plan = await clarify_missing_fields(plan)
+                if not plan:
+                    continue
+                action = plan.get("action")
+                params = plan.get("params", {})
 
                 if action == "send_email":
                     missing = [f for f in ("to", "subject", "body") if f not in params or not params[f]]
