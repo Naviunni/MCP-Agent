@@ -51,7 +51,13 @@ async def handle_read_pdfs(session: ClientSession, params: dict):
             print(f"❌ Error reading {file_path}: {e}")
 
 
-async def handle_query_pdfs(question: str, llm_client):
+async def handle_query_pdfs(
+    question: str,
+    llm_client,
+    use_ollama: bool = False,
+    openai_model: str = "gpt-4o",
+    ollama_model: str = "llama3",
+):
     """
     Answers a question based on cached PDF text using the provided LLM client.
     """
@@ -60,7 +66,7 @@ async def handle_query_pdfs(question: str, llm_client):
         return
 
     combined_text = "\n".join(pdf_cache.values())[:15000]  # limit for token safety
-    print(combined_text)
+    # print(combined_text)
 
     prompt = f"""
 You are Janet, an assistant answering based only on the provided PDF contents.
@@ -75,15 +81,32 @@ Give a short, clear answer based only on the PDFs. If unsure, say so.
 """
 
     try:
-        response = await llm_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-        )
-        answer = response.choices[0].message.content.strip()
+        if use_ollama:
+            # Local model via Ollama (synchronous call inside async; acceptable like janet.py)
+            import ollama
+
+            print(f"🧠 Using local Ollama model for PDF QA: {ollama_model}")
+            response = ollama.chat(
+                model=ollama_model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            answer = response["message"]["content"].strip()
+        else:
+            # OpenAI GPT path
+            print(f"🧠 Using OpenAI model for PDF QA: {openai_model}")
+            response = await llm_client.chat.completions.create(
+                model=openai_model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            answer = response.choices[0].message.content.strip()
+
         print(f"\n🧠 Answer based on PDFs:\n{answer}\n")
         return answer
     except Exception as e:
