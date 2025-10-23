@@ -29,6 +29,8 @@ import ollama
 from janet_pdf import pdf_session, handle_read_pdfs, handle_query_pdfs
 from openai import AsyncOpenAI
 
+from janet_search import perform_web_search, search_session
+
 
 
 
@@ -108,7 +110,7 @@ def _build_system_prompt() -> str:
 
         # NEW: Include 'answer' and 'ask_user'
         "Supported actions: send_email, draft_email, read_email, search_emails, create_event, "
-        "list_events, delete_event, read_pdf, query_pdf, ask_user.\n\n"
+        "list_events, delete_event, read_pdf, query_pdf, search_web, ask_user.\n\n"
 
         f"Respond ONLY in valid JSON with no explanations. When drafting or sending emails, you may sign them as:\n\nBest,\n{SENDER_NAME}\n\n"
         f"For context, today's date: {current_date}\n\n"
@@ -156,7 +158,13 @@ def _build_system_prompt() -> str:
         "{\"action\": \"query_pdf\", \"params\": {\"question\": \"What is the story in shortStory1.pdf about?\"}}\n"
         " - Only answer based on PDFs that have already been read.\n\n"
 
-        # ---------------- ANSWER / ASK_USER ----------------
+        #WEB SEARCH RULES
+        "For search_web: include {\"query\": string} when the user request requires looking up information online.\n"
+        '''- Example: 'What is the latest SpaceX Starship status?'
+           -{"action": "search_web", "params": {"query": "latest SpaceX Starship status"}}
+           - Use this action when you need real-time or external data not covered by email, calendar or PDFs.\n\n'''
+
+        # ---------------- ASK_USER ----------------
         "For ask_user: include {\"question\": string} when clarification is required.\n"
     )
 
@@ -314,6 +322,18 @@ async def main() -> None:
                             openai_model=OPENAI_MODEL,
                             ollama_model=OLLAMA_MODEL,
                         )
+                    elif action == "search_web":
+                        query = params.get("query")
+                        if not query:
+                            print("❓ Missing query for web search.")
+                            continue
+
+                        try:
+                            from janet_search import search_session, perform_web_search
+                            async with search_session() as ss:
+                                await perform_web_search(ss, query)
+                        except Exception as e:
+                            print(f"❌ Web search failed: {e}")
 
                     elif action == "ask_user":
                         followup = params.get("question", "Could you clarify?")
