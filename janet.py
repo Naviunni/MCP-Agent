@@ -30,6 +30,7 @@ from openai import AsyncOpenAI
 import re
 
 from janet_search import perform_web_search, search_session
+from janet_pizza import handle_order_pizza
 
 
 
@@ -159,7 +160,7 @@ def _build_system_prompt() -> str:
 
         # NEW: Include 'answer' and 'ask_user'
         "Supported actions: send_email, draft_email, read_email, search_emails, create_event, "
-        "list_events, delete_event, read_pdf, query_pdf, search_web, ask_user.\n\n"
+        "list_events, delete_event, read_pdf, query_pdf, search_web, ask_user, order_pizza.\n\n"
 
         f"Respond ONLY in valid JSON with no explanations. When drafting or sending emails, you may sign them as:\n\nBest,\n{SENDER_NAME}\n\n"
         f"For context, today's date: {current_date}\n\n"
@@ -223,6 +224,9 @@ def _build_system_prompt() -> str:
         - or if essential parameters are missing (like recipient email, subject, file name, dates, time range, or search query), then you must NOT guess or act ambiguously.
         Instead, respond with:
         { "action": "ask_user", "params": { "question": "<a single clear question to remove the uncertainty>" } }'''
+
+        # ---------------- PIZZA ----------------
+        "For order_pizza: start an interactive Domino's pizza ordering flow that asks for address, suggests a nearby store, optionally shows a grouped menu (pizzas, sides, drinks, desserts), collects up to 5 items, then prices the order without placing it.\n\n"
     )
 
 
@@ -429,6 +433,13 @@ async def main() -> None:
                         except Exception as e:
                             print(f"❌ Web search failed: {e}")
 
+                    # ---------------- PIZZA ----------------
+                    elif action == "order_pizza":
+                        try:
+                            await handle_order_pizza(params)
+                        except Exception as e:
+                            print(f"❌ Pizza assistant failed: {e}")
+
                     # ---------------- ASK USER ----------------
                     elif action == "ask_user":
                         new_plan = await handle_ask_user(plan, client, context)
@@ -468,6 +479,8 @@ async def main() -> None:
                                         openai_model=OPENAI_MODEL,
                                         ollama_model=OLLAMA_MODEL,
                                     )
+                            elif action == "order_pizza":
+                                await handle_order_pizza(params)
                             else:
                                 print("🤔 Clarification complete, but no valid follow-up action detected.")
                         else:
