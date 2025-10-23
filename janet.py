@@ -26,6 +26,9 @@ from janet_calendar import (
     handle_delete_event,
 )
 import ollama
+from janet_pdf import pdf_session, handle_read_pdfs, handle_query_pdfs
+from openai import AsyncOpenAI
+
 
 
 
@@ -60,7 +63,7 @@ def _build_system_prompt() -> str:
     current_date = datetime.now().strftime("%Y-%m-%d")
     return (
         "You are Janet, a personal assistant for Navya that converts user requests into JSON tool calls for Gmail and Google Calendar MCP.\n\n"
-        "Supported actions: send_email, draft_email, read_email, search_emails, create_event, list_events, delete_event.\n"
+        "Supported actions: send_email, draft_email, read_email, search_emails, create_event, list_events, delete_event, read_pdf, query_pdf.\n"
         f"Respond ONLY in valid JSON with no explanations. When drafting and sending emails, you may sign them as:\n\nBest, \n{SENDER_NAME}\n\n"
         f"For context, today's date: {current_date}\n\n"
         "For create_event: include fields summary (string), start (ISO datetime), end (ISO datetime), attendees (array), and optional location.\n"
@@ -82,6 +85,17 @@ def _build_system_prompt() -> str:
         "'from:', 'to:', 'subject:', or quoted keywords. Example:\n"
         "  User: check if I got a reply from alice@example.com about the meeting\n"
         "  → {\"action\": \"search_emails\", \"params\": {\"query\": \"from:alice@example.com subject:meeting\"}}\n"
+        "For read_pdf:\n"
+        " - Include {\"sources\": [{\"path\": \"<file_path>\"}]}.\n"
+        " - Example: 'Read the pdf abc.pdf' → "
+        "{\"action\": \"read_pdf\", \"params\": {\"sources\": [{\"path\": \"abc.pdf\"}]}}\n"
+        " - If the filename or path is missing, leave it blank so the user can be asked.\n"
+        "For query_pdf:\n"
+        " - Include {\"question\": string}.\n"
+        " - Example: 'who is John in abc.pdf?' → "
+        "{\"action\": \"query_pdf\", \"params\": {\"question\": \"who is John in abc.pdf?\"}}\n"
+        " - The assistant should only answer questions based on PDFs that have already been read.\n\n"
+
         "If unsure, include both 'from:<address>' and main topic words.\n"
         "If key details (like recipient, subject, query) are missing, leave them empty in the JSON so that the user can be asked interactively.\n"
     )
@@ -176,7 +190,7 @@ async def main() -> None:
         args=["@gongrzhe/server-gmail-autoauth-mcp"],
         env=os.environ.copy(),
     )
-
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     async with stdio_client(server) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -226,6 +240,13 @@ async def main() -> None:
                         await handle_list_events(calendar_session, params)
                     elif action == "delete_event":
                         await handle_delete_event(calendar_session, params)
+                    if action == "read_pdf":
+                        async with pdf_session() as ps:
+                            await handle_read_pdfs(ps, params)
+
+                    elif action == "query_pdf":
+                        question = params.get("question", text)
+                        await handle_query_pdfs(question, client)
                     else:
                         print("I didn’t understand that command.")  
 
