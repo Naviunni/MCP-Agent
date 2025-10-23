@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 from typing import List, Dict, Any
+from urllib.parse import quote as _urlquote
 
 
 DOM_TEST_DIR = os.path.join(os.path.dirname(__file__), 'dominos-test')
@@ -91,12 +92,22 @@ async def handle_order_pizza(params: Dict[str, Any]):
             ) or address
 
         # pick recommended store
-        open_stores = [s for s in stores if s.get('IsOnlineCapable') and s.get('IsDeliveryStore') and s.get('IsOpen') and (s.get('ServiceIsOpen') or {}).get('Delivery')]
-        rec = (sorted(open_stores, key=lambda s: s.get('MinDistance', 1e9)) or [stores[0]])[0]
+        open_stores = [
+            s for s in stores
+            if s.get('IsOnlineCapable') and s.get('IsDeliveryStore') and s.get('IsOpen') and (s.get('ServiceIsOpen') or {}).get('Delivery')
+        ]
+
+        # Prefer specific stores if present (e.g., Northgate #6630)
+        preferred_ids = {"6630", 6630}
+        prefer = next((s for s in open_stores if s.get('StoreID') in preferred_ids), None)
+        if not prefer:
+            prefer = next((s for s in stores if s.get('StoreID') in preferred_ids), None)
+
+        rec = prefer or (sorted(open_stores, key=lambda s: s.get('MinDistance', 1e9)) or [stores[0]])[0]
         print("\nNearby stores:")
         for i, s in enumerate(stores[:5]):
             sid = s.get('StoreID', 'unknown')
-            addr = s.get('AddressDescription', 'Unknown address')
+            addr = (s.get('AddressDescription', 'Unknown address') or '').replace('\n', ', ')
             dist = s.get('MinDistance')
             dist_str = f"{dist}mi" if dist is not None else "distance n/a"
             flag = " (recommended)" if sid == rec.get("StoreID") else ""
@@ -122,7 +133,6 @@ async def handle_order_pizza(params: Dict[str, Any]):
         if not m.get("ok"):
             print(f"⚠️ Failed to load menu: {m.get('error')}")
         else:
-            print(m)
             groups = m.get("groups", {})
             print("\nSome menu items (use the code in brackets to add):")
             for cat in ["pizzas", "sides", "drinks", "desserts", "other"]:
@@ -173,7 +183,49 @@ async def handle_order_pizza(params: Dict[str, Any]):
     ])
     if not price.get("ok"):
         print(f"❌ Could not price order: {price.get('error')}")
-        return
+        # Extra diagnostics if available
+        vr = (price.get('validationResponse') or {}).get('Order') or {}
+        pr = (price.get('priceResponse') or {}).get('Order') or {}
+        status_items = vr.get('StatusItems') or pr.get('StatusItems') or []
+        corrective = vr.get('CorrectiveAction') or pr.get('CorrectiveAction') or {}
+        if status_items:
+            print("Status items:")
+            for s in status_items:
+                code = s.get('Code'); msg = s.get('Message')
+                print(f"  - {code}: {msg}")
+        if corrective:
+            print("Suggested corrective actions:")
+            for k, v in corrective.items():
+                print(f"  - {k}: {v}")
+        # Offer quick retry with carryout if delivery not allowed
+        err_text = (price.get('error') or '').lower()
+        if 'servicemethodnotallowed' in err_text:
+            retry = _prompt("Delivery not allowed. Try Carryout instead? (y/n): ")
+            if retry.lower() in {"y", "yes"}:
+                price = _run_node([
+                    "price",
+                    "--store", store_id,
+                    "--address", address,
+                    "--first", first,
+                    "--last", last,
+                    "--phone", phone,
+                    "--email", email,
+                    "--items", items_json,
+                    "--service", "Carryout",
+                ])
+                if not price.get('ok'):
+                    print(f"❌ Carryout also failed: {price.get('error')}")
+                    enc = _urlquote(address)
+                    print("\n➡️  You can also order directly:")
+                    print(f"  Delivery: https://www.dominos.com/en/pages/order/#/locations/search/?type=Delivery&c={enc}")
+                    print(f"  Carryout: https://www.dominos.com/en/pages/order/#/locations/search/?type=Carryout&c={enc}")
+                    return
+            else:
+                enc = _urlquote(address)
+                print("\n➡️  You can also order directly:")
+                print(f"  Delivery: https://www.dominos.com/en/pages/order/#/locations/search/?type=Delivery&c={enc}")
+                print(f"  Carryout: https://www.dominos.com/en/pages/order/#/locations/search/?type=Carryout&c={enc}")
+                return
 
     ab = price.get("amountsBreakdown", {})
     print("\n🧾 Cart:")
@@ -186,5 +238,46 @@ async def handle_order_pizza(params: Dict[str, Any]):
     print(f"  Tax: {ab.get('tax')}")
     print(f"  Total (customer): {ab.get('customer')}")
 
-    print("\n⚠️ Placing the order is disabled for testing.")
-    print("If you want, we can place it later with card details.")
+    # 6) Collect card details (kept for testing; we do NOT place now)
+    print("\n💳 Payment details (for testing — order will NOT be placed)")
+    card_number = _prompt("Card number (digits only): ")
+    exp = _prompt("Expiration (MM/YY): ")
+    cvv = _prompt("CVV: ")
+    postal = _prompt("Billing ZIP/Postal code: ")
+    tip_in = _prompt("Tip amount (e.g., 3.00) [optional]: ")
+    try:
+        tip_amt = float(tip_in) if tip_in else 0
+    except Exception:
+        tip_amt = 0
+
+    print("\n⚠️ Placing the order is currently disabled.")
+    print("We have card details, but won’t submit them.")
+    print("If you want to actually place the order, uncomment the code in janet_pizza.py.")
+
+    # Example: placing the order via the CLI (DISABLED)
+    # place = _run_node([
+    #     "place",
+    #     "--store", store_id,
+    #     "--address", address,
+    #     "--first", first,
+    #     "--last", last,
+    #     "--phone", phone,
+    #     "--email", email,
+    #     "--items", items_json,
+    #     "--cardNumber", card_number,
+    #     "--exp", exp,
+    #     "--cvv", cvv,
+    #     "--postal", postal,
+    #     "--tip", str(tip_amt),
+    # ])
+    # if not place.get("ok"):
+    #     print(f"❌ Place order failed: {place.get('error')}")
+    # else:
+    #     print("✅ Order placed! Confirmation:")
+    #     print(json.dumps(place.get('placeResponse'), indent=2))
+
+    # Provide Domino's website links as an alternative
+    enc = _urlquote(address)
+    print("\n➡️  Prefer ordering on the website? Use:")
+    print(f"  Delivery: https://www.dominos.com/en/pages/order/#/locations/search/?type=Delivery&c={enc}")
+    print(f"  Carryout: https://www.dominos.com/en/pages/order/#/locations/search/?type=Carryout&c={enc}")
