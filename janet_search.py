@@ -11,9 +11,8 @@ from openai import AsyncOpenAI
 # Load environment variables (BRIGHT_API_TOKEN, WEB_UNLOCKER_ZONE)
 load_dotenv()
 
-# Optional: set your OpenAI key if you want summaries
+# OpenAI API key (used if summarizing with OpenAI)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
 def _clean_html(text: str) -> str:
@@ -49,7 +48,14 @@ async def search_session():
             yield session
 
 
-async def perform_web_search(session: ClientSession, query: str):
+async def perform_web_search(
+    session: ClientSession,
+    query: str,
+    *,
+    use_ollama: bool = True,
+    openai_model: str = "gpt-4o-mini",
+    ollama_model: str = "llama3",
+):
     """Run a web search using Bright Data and summarize results."""
     print(f"🔎 Searching the web for: {query}")
     result = await session.call_tool("search_engine", arguments={"query": query})
@@ -72,21 +78,36 @@ async def perform_web_search(session: ClientSession, query: str):
     for i, snippet in enumerate(cleaned[:3], start=1):
         print(f"{i}. {snippet[:250]}...\n")
 
-    # Optional LLM summarization
-    if openai_client:
-        summary_prompt = (
-            f"Summarize these search results into 3–4 concise bullet points:\n\n"
-            + "\n".join(cleaned[:5])
-        )
-        try:
-            completion = await openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+    # Optional LLM summarization respecting model switch
+    summary_prompt = (
+        f"Summarize these search results into 3–4 concise bullet points:\n\n"
+        + "\n".join(cleaned[:5])
+    )
+
+    try:
+        if use_ollama:
+            import ollama
+            print(f"🧠 Summarizing with Ollama: {ollama_model}")
+            response = ollama.chat(
+                model=ollama_model,
+                messages=[{"role": "user", "content": summary_prompt}],
+            )
+            summary = response["message"]["content"].strip()
+            print("🧠 Summary:\n" + summary)
+        elif OPENAI_API_KEY:
+            client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+            print(f"🧠 Summarizing with OpenAI: {openai_model}")
+            completion = await client.chat.completions.create(
+                model=openai_model,
                 messages=[{"role": "user", "content": summary_prompt}],
                 temperature=0.2,
             )
             summary = completion.choices[0].message.content
             print("🧠 Summary:\n" + summary)
-        except Exception as e:
-            print(f"⚠️ Summarization failed: {e}")
+        else:
+            # No summarization available
+            pass
+    except Exception as e:
+        print(f"⚠️ Summarization failed: {e}")
 
     return cleaned

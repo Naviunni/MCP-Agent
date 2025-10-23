@@ -25,7 +25,6 @@ from janet_calendar import (
     handle_list_events,
     handle_delete_event,
 )
-import ollama
 from janet_pdf import pdf_session, handle_read_pdfs, handle_query_pdfs
 from openai import AsyncOpenAI
 import re
@@ -39,12 +38,14 @@ from janet_search import perform_web_search, search_session
 # Configuration
 # -------------------------
 
-OPENAI_MODEL: str = os.getenv("JANET_MODEL", "gpt-4o-mini")
 SENDER_NAME: str = os.getenv("JANET_SENDER_NAME", "Navya")
 # ----------------- MODEL CONFIGURATION -----------------
-USE_OLLAMA = False  # Set to True to use your local Ollama model instead of GPT-4o
-OLLAMA_MODEL = "llama3"  # or "mistral", "phi3", "codellama", etc.
-OPENAI_MODEL = "gpt-4o"  # or "gpt-4o-mini" for speed
+# Separate toggles for core (intent, ask_user) vs tools (PDF, web)
+# Defaults: core uses GPT, tools use Ollama
+USE_OLLAMA_CORE = False
+USE_OLLAMA_TOOLS = True
+OLLAMA_MODEL = os.getenv("JANET_OLLAMA_MODEL", "llama3")  # e.g., "mistral", "phi3"
+OPENAI_MODEL = os.getenv("JANET_MODEL", "gpt-4o")  # or "gpt-4o-mini" for speed
 # -------------------------------------------------------
 
 
@@ -71,13 +72,26 @@ async def handle_ask_user(action_json, llm_client, context):
     context.append({"role": "assistant", "content": question})
     context.append({"role": "user", "content": user_reply})
 
-    # Ask LLM again with updated context
-    completion = await llm_client.chat.completions.create(
-        model=context[0]["model"] if "model" in context[0] else "gpt-4o",
-        messages=context,
-        temperature=0.1,
-    )
-    raw_output = completion.choices[0].message.content.strip()
+    # Ask LLM again with updated context, honoring model switch
+    if USE_OLLAMA_CORE:
+        try:
+            import ollama
+            print(f"🧠 Using local Ollama model: {OLLAMA_MODEL}")
+            response = ollama.chat(
+                model=OLLAMA_MODEL,
+                messages=context,
+            )
+            raw_output = response["message"]["content"].strip()
+        except Exception as e:
+            print("⚠️ Ollama error during clarification:", e)
+            return None
+    else:
+        completion = await llm_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=context,
+            temperature=0.1,
+        )
+        raw_output = completion.choices[0].message.content.strip()
 
     # ✅ --- Strip markdown fences like ```json ... ```
     cleaned_output = re.sub(r"^```(?:json)?|```$", "", raw_output, flags=re.MULTILINE).strip()
@@ -234,9 +248,10 @@ async def interpret_intent(user_text: str) -> Optional[Plan]:
     #     return None
     system_prompt = _build_system_prompt()
     user_input = user_text
-    if USE_OLLAMA:
+    if USE_OLLAMA_CORE:
         # --- Local LLM path (Ollama) ---
         try:
+            import ollama
             print(f"🧠 Using local Ollama model: {OLLAMA_MODEL}")
             response = ollama.chat(
                 model=OLLAMA_MODEL,
@@ -322,9 +337,20 @@ async def main() -> None:
 
                     # Toggle model on the fly
                     if text.lower().startswith("switch model"):
-                        global USE_OLLAMA
-                        USE_OLLAMA = not USE_OLLAMA
-                        print(f"🔁 Switched to {'Ollama (local)' if USE_OLLAMA else 'GPT-4o (OpenAI)'}")
+                        global USE_OLLAMA_CORE, USE_OLLAMA_TOOLS
+                        lower = text.lower()
+                        if lower.startswith("switch model core"):
+                            USE_OLLAMA_CORE = not USE_OLLAMA_CORE
+                            print(f"🔁 Core intent now: {'Ollama' if USE_OLLAMA_CORE else 'OpenAI'}")
+                        elif lower.startswith("switch model tools"):
+                            USE_OLLAMA_TOOLS = not USE_OLLAMA_TOOLS
+                            print(f"🔁 Tools now: {'Ollama' if USE_OLLAMA_TOOLS else 'OpenAI'}")
+                        else:
+                            USE_OLLAMA_CORE = not USE_OLLAMA_CORE
+                            USE_OLLAMA_TOOLS = not USE_OLLAMA_TOOLS
+                            print(
+                                f"🔁 Core: {'Ollama' if USE_OLLAMA_CORE else 'OpenAI'}, Tools: {'Ollama' if USE_OLLAMA_TOOLS else 'OpenAI'}"
+                            )
                         continue
 
                     # Build system + user context for LLM
@@ -380,7 +406,7 @@ async def main() -> None:
                         await handle_query_pdfs(
                             question,
                             client,
-                            use_ollama=USE_OLLAMA,
+                            use_ollama=USE_OLLAMA_TOOLS,
                             openai_model=OPENAI_MODEL,
                             ollama_model=OLLAMA_MODEL,
                         )
@@ -393,7 +419,13 @@ async def main() -> None:
                             continue
                         try:
                             async with search_session() as ss:
-                                await perform_web_search(ss, query)
+                                await perform_web_search(
+                                    ss,
+                                    query,
+                                    use_ollama=USE_OLLAMA_TOOLS,
+                                    openai_model=OPENAI_MODEL,
+                                    ollama_model=OLLAMA_MODEL,
+                                )
                         except Exception as e:
                             print(f"❌ Web search failed: {e}")
 
@@ -422,14 +454,20 @@ async def main() -> None:
                                 await handle_query_pdfs(
                                     question,
                                     client,
-                                    use_ollama=USE_OLLAMA,
+                                    use_ollama=USE_OLLAMA_TOOLS,
                                     openai_model=OPENAI_MODEL,
                                     ollama_model=OLLAMA_MODEL,
                                 )
                             elif action == "search_web":
                                 query = params.get("query")
                                 async with search_session() as ss:
-                                    await perform_web_search(ss, query)
+                                    await perform_web_search(
+                                        ss,
+                                        query,
+                                        use_ollama=USE_OLLAMA_TOOLS,
+                                        openai_model=OPENAI_MODEL,
+                                        ollama_model=OLLAMA_MODEL,
+                                    )
                             else:
                                 print("🤔 Clarification complete, but no valid follow-up action detected.")
                         else:

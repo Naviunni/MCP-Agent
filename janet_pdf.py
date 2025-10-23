@@ -54,7 +54,7 @@ async def handle_read_pdfs(session: ClientSession, params: dict):
 async def handle_query_pdfs(
     question: str,
     llm_client,
-    use_ollama: bool = False,
+    use_ollama: bool = True,
     openai_model: str = "gpt-4o",
     ollama_model: str = "llama3",
 ):
