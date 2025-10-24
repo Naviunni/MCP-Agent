@@ -58,6 +58,39 @@ async def _leave_browser_open(page: Page) -> None:
     print("Browser will remain open. You can close it when finished.")
 
 
+async def _pick_first_address_suggestion(page: Page) -> bool:
+    """After typing street address, pick the first suggestion from the autocomplete list.
+
+    Tries common ARIA listbox/option patterns and falls back to ArrowDown+Enter.
+    Returns True if a selection interaction was performed.
+    """
+    # Wait briefly for any suggestion list to appear
+    candidates = [
+        "[role='listbox'] [role='option']",
+        "ul[role='listbox'] li",
+        "div[role='option']",
+        "[data-testid*='suggest']",
+    ]
+    # Try clicking the first visible option
+    for sel in candidates:
+        try:
+            first = page.locator(sel).first
+            await first.wait_for(state="visible", timeout=1500)
+            await first.click()
+            await asyncio.sleep(0.2)
+            return True
+        except Exception:
+            continue
+    # Fallback: keyboard navigation
+    try:
+        await page.keyboard.press("ArrowDown")
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.2)
+        return True
+    except Exception:
+        return False
+
+
 async def _dismiss_any_modal(page: Page) -> bool:
     """Dismiss common upsell/overlay modals by clicking 'No Thanks' or closing/ESC.
 
@@ -607,42 +640,34 @@ async def handle_order_pizza(params: Dict[str, Any]):
         else:
             await _click_if_present(page, ["button:has-text('Carryout')", "button:has-text('Pickup')", "[data-testid*='Carryout']"])  # lenient
 
-        # Fill address: Carryout uses only ZIP, Delivery uses street + ZIP
+        # Fill address (Delivery): type street, pick first suggestion, then add ZIP
         await asyncio.sleep(0.5)
-        if service == "Carryout":
-            await _fill_if_present(
-                page,
-                [
-                    "input[aria-label*='ZIP' i]",
-                    "input[aria-label*='Postal' i]",
-                    "input[name*='zip' i]",
-                    "input[name*='postal' i]",
-                    "input[placeholder*='ZIP' i]",
-                ],
-                zip_code,
-            )
-        else:
-            await _fill_if_present(
-                page,
-                [
-                    "input[aria-label*='Street' i]",
-                    "input[name*='street' i]",
-                    "input[placeholder*='Street' i]",
-                    "label:has-text('Street') >> .. >> input",
-                ],
-                street,
-            )
-            await _fill_if_present(
-                page,
-                [
-                    "input[aria-label*='ZIP' i]",
-                    "input[aria-label*='Postal' i]",
-                    "input[name*='zip' i]",
-                    "input[name*='postal' i]",
-                    "input[placeholder*='ZIP' i]",
-                ],
-                zip_code,
-            )
+        await _fill_if_present(
+            page,
+            [
+                "input[aria-label*='Street' i]",
+                "input[name*='street' i]",
+                "input[placeholder*='Street' i]",
+                "label:has-text('Street') >> .. >> input",
+            ],
+            street,
+        )
+        # Try to pick the first address suggestion from the dropdown
+        try:
+            await _pick_first_address_suggestion(page)
+        except Exception:
+            pass
+        await _fill_if_present(
+            page,
+            [
+                "input[aria-label*='ZIP' i]",
+                "input[aria-label*='Postal' i]",
+                "input[name*='zip' i]",
+                "input[name*='postal' i]",
+                "input[placeholder*='ZIP' i]",
+            ],
+            zip_code,
+        )
 
         # Submit location
         submitted = await _click_if_present(
