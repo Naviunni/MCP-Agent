@@ -100,7 +100,7 @@ async def handle_ask_user(action_json, llm_client, context):
 
     try:
         new_json = json.loads(cleaned_output)
-        print(f"🧩 Updated plan: {json.dumps(new_json, indent=2)}")
+        # print(f"🧩 Updated plan: {json.dumps(new_json, indent=2)}")
         return new_json
     except Exception as e:
         print(f"⚠️ Could not parse LLM output after clarification: {e}")
@@ -122,7 +122,7 @@ def _build_system_prompt() -> str:
 
         # NEW: Include 'answer' and 'ask_user'
         "Supported actions: send_email, draft_email, read_email, search_emails, create_event, "
-        "list_events, delete_event, read_pdf, query_pdf, search_web, ask_user, order_pizza.\n\n"
+        "list_events, read_pdf, query_pdf, search_web, ask_user, order_pizza.\n\n"
 
         f"Respond ONLY in valid JSON with no explanations. When drafting or sending emails, you may sign them as:\n\nBest,\n{SENDER_NAME}\n\n"
         f"For context, today's date: {current_date}\n\n"
@@ -155,7 +155,6 @@ def _build_system_prompt() -> str:
         "→ {\"action\": \"list_events\", \"params\": {\"start_date\": \"2025-10-24T00:00:00\", \"end_date\": \"2025-10-24T23:59:59\"}}\n"
         "User: 'Show me events between Oct 25 and Oct 28'\n"
         "→ {\"action\": \"list_events\", \"params\": {\"start_date\": \"2025-10-25T00:00:00\", \"end_date\": \"2025-10-28T23:59:59\"}}\n"
-        "For delete_event: include id (string) or summary (string).\n\n"
 
         # ---------------- PDF READER RULES ----------------
         "For read_pdf:\n"
@@ -195,21 +194,6 @@ async def interpret_intent(user_text: str) -> Optional[Plan]:
     """Use the OpenAI model — return None if invalid."""
     from openai import AsyncOpenAI  # lazy import to avoid hard dependency at import time
 
-    # client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    # resp = await client.chat.completions.create(
-    #     model=OPENAI_MODEL,
-    #     temperature=0,
-    #     messages=[
-    #         {"role": "system", "content": _build_system_prompt()},
-    #         {"role": "user", "content": user_text},
-    #     ],
-    # )
-    # try:
-    #     content = resp.choices[0].message.content
-    #     return json.loads(content) if content else None
-    # except Exception:
-    #     print("I couldn't interpret that request. Try rephrasing.")
-    #     return None
     system_prompt = _build_system_prompt()
     user_input = user_text
     if USE_OLLAMA_CORE:
@@ -320,7 +304,7 @@ async def main() -> None:
                         if not plan:
                             continue
 
-                        print("🧩 LLM output:", json.dumps(plan, indent=2))
+                        # print("🧩 LLM output:", json.dumps(plan, indent=2))
 
                         # --- If LLM couldn’t parse or flagged invalid ---
                         if plan.get("action") == "invalid":
@@ -351,8 +335,6 @@ async def main() -> None:
                             await handle_create_event(calendar_session, params)
                         elif action == "list_events":
                             await handle_list_events(calendar_session, params)
-                        elif action == "delete_event":
-                            await handle_delete_event(calendar_session, params)
 
                         # ---------------- PDF ----------------
                         elif action == "read_pdf":
@@ -415,6 +397,8 @@ async def main() -> None:
                                     await handle_search_and_read(gmail_session, params)
                                 elif action == "create_event":
                                     await handle_create_event(calendar_session, params)
+                                elif action == "list_events":
+                                    await handle_list_events(calendar_session, params)
                                 elif action == "read_pdf":
                                     async with pdf_session() as ps:
                                         await handle_read_pdfs(ps, params)
