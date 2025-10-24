@@ -5,12 +5,12 @@ from typing import List, Dict, Any
 from urllib.parse import quote as _urlquote
 
 
-DOM_TEST_DIR = os.path.join(os.path.dirname(__file__), 'dominos-test')
+DOM_TEST_DIR = os.path.join(os.path.dirname(__file__), 'dominos-mcp')
 CLI_PATH = os.path.join(DOM_TEST_DIR, 'cli.js')
 
 
 def _run_node(cmd: List[str]) -> Dict[str, Any]:
-    """Run the dominos-test/cli.js with given args and return parsed JSON."""
+    """Run the dominos-mcp/cli.js with given args and return parsed JSON."""
     try:
         result = subprocess.run(
             ['node', CLI_PATH] + cmd,

@@ -471,7 +471,6 @@ async def _open_combobox_and_pick(page: Page, keywords: List[str], value_text: s
             except Exception:
                 continue
     return False
-    return False
 
 
 async def _scroll_to_most_popular(page: Page) -> None:
@@ -574,7 +573,7 @@ async def _open_pizza_details(page: Page, name_tokens: List[str], timeout_ms: in
 
 
 async def handle_order_pizza(params: Dict[str, Any]):
-    print("🍕 Papa John’s web assistant — guided flow")
+    print("🍕 Pizza ordering Assistant - Papa John's")
     print("Type 'cancel' anytime to abort.")
 
     def _prompt(msg: str) -> str:
