@@ -3,6 +3,30 @@ from typing import Dict, Any, List, Tuple
 
 from playwright.async_api import async_playwright, Page
 
+# Global Playwright/browser objects to keep the browser alive across calls
+_playwright = None
+_browser = None
+_context = None
+_page = None
+
+
+async def _ensure_browser(headless: bool = False) -> Page:
+    global _playwright, _browser, _context, _page
+    if _page is not None:
+        try:
+            if not _page.is_closed():
+                return _page
+        except Exception:
+            pass
+    if _playwright is None:
+        _playwright = await async_playwright().start()
+    if _browser is None:
+        _browser = await _playwright.chromium.launch(headless=headless)
+    if _context is None:
+        _context = await _browser.new_context()
+    _page = await _context.new_page()
+    return _page
+
 
 async def _click_if_present(page: Page, selectors: List[str], timeout: int = 2000) -> bool:
     for sel in selectors:
@@ -30,13 +54,119 @@ async def _fill_if_present(page: Page, selectors: List[str], value: str, timeout
 
 
 async def _leave_browser_open(page: Page) -> None:
-    """Keep the browser/tab open for the user until they close it manually."""
+    """No-op: the browser is kept open by design (not tied to a context)."""
+    print("Browser will remain open. You can close it when finished.")
+
+
+async def _dismiss_any_modal(page: Page) -> bool:
+    """Dismiss common upsell/overlay modals by clicking 'No Thanks' or closing/ESC.
+
+    Returns True if an action was taken that likely closed a modal.
+    """
+    acted = False
+    # Prefer explicit negative/close actions
+    for sel in [
+        "button:has-text('No Thanks')",
+        "button:has-text('No thank')",
+        "button:has-text('No, thanks')",
+        "button:has-text('Maybe later')",
+        "button:has-text('Skip')",
+        "button:has-text('Close')",
+        "[aria-label='Close']",
+        "[aria-label*='close' i]",
+        "button:has-text('Continue to checkout')",
+        "button:has-text('Continue shopping')",
+    ]:
+        try:
+            el = await page.wait_for_selector(sel, timeout=1200)
+            await el.click()
+            acted = True
+            break
+        except Exception:
+            continue
+    if not acted:
+        # Try pressing Escape
+        try:
+            await page.keyboard.press("Escape")
+            acted = True
+        except Exception:
+            pass
+    if not acted:
+        # Try clicking outside (top-left corner)
+        try:
+            await page.mouse.click(10, 10)
+            acted = True
+        except Exception:
+            pass
+    # Small pause to allow UI to update
+    if acted:
+        await asyncio.sleep(0.3)
+    return acted
+
+
+async def _handle_carryout_store_selection(page: Page) -> None:
+    """Carryout flow: click first 'Select Store', then in the confirmation modal click 'Select Store' again."""
+    # Click the first Select Store in the list (button or link)
     try:
-        print("Browser will remain open. Close the tab/window when finished.")
-        await page.wait_for_event("close")
+        locator = page.locator("button:has-text('Select Store'), a:has-text('Select Store')")
+        count = await locator.count()
+        if count > 0:
+            first = locator.nth(0)
+            try:
+                await first.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            await first.click()
     except Exception:
         pass
 
+    # Wait for a confirmation modal and click Select Store inside it
+    try:
+        # Prefer role=dialog or aria-modal containers
+        dialog = page.get_by_role("dialog")
+        # wait briefly for any dialog to appear
+        try:
+            await dialog.wait_for(state="visible", timeout=5000)
+        except Exception:
+            # fall back to text match presence
+            try:
+                await page.wait_for_selector(r"text=/confirm\s+your\s+carryout\s+time/i", timeout=3000)
+            except Exception:
+                pass
+        # Try clicking the Select Store or Continue button within the dialog first
+        dlg_clicked = False
+        for sel in [
+            "button:has-text('Select Store')",
+            "button:has-text('Continue')",
+            "button:has-text('Confirm')",
+        ]:
+            try:
+                btn = dialog.locator(sel).first
+                await btn.wait_for(state="visible", timeout=2500)
+                await btn.click()
+                dlg_clicked = True
+                break
+            except Exception:
+                continue
+        if not dlg_clicked:
+            # Try global search as a fallback
+            for sel in [
+                "button:has-text('Select Store')",
+                "button:has-text('Continue')",
+                "button:has-text('Confirm')",
+            ]:
+                try:
+                    btn = await page.wait_for_selector(sel, timeout=2000)
+                    await btn.click()
+                    dlg_clicked = True
+                    break
+                except Exception:
+                    continue
+        # If a modal remains, try a generic dismiss and proceed
+        if not dlg_clicked:
+            await _dismiss_any_modal(page)
+    except Exception:
+        pass
 
 def _is_large_or_above(size_text: str) -> bool:
     """Return True if size indicates Large or bigger (e.g., Large, XL, Extra Large)."""
@@ -116,7 +246,7 @@ async def _select_by_label(page: Page, label_keywords: List[str], option_text: s
 async def _handle_unavailable_combo(page: Page) -> bool:
     """Detect and dismiss 'This Combination is not available' modal by clicking Continue/OK."""
     try:
-        await page.wait_for_selector("text=/combination\s+is\s+not\s+available/i", timeout=1500)
+        await page.wait_for_selector(r"text=/combination\s+is\s+not\s+available/i", timeout=1500)
     except Exception:
         return False
     clicked = await _click_if_present(
@@ -421,10 +551,8 @@ async def handle_order_pizza(params: Dict[str, Any]):
             print("\n❌ Cancelled.")
             raise SystemExit(1)
 
-    # 1) Service selection
-    service = (_prompt("Service (Delivery/Carryout) [Delivery]: ") or "Delivery").title()
-    if service not in {"Delivery", "Carryout"}:
-        service = "Delivery"
+    # 1) Service selection — always Delivery (no prompt)
+    service = "Delivery"
 
     # 2) Address
     street = _prompt("Street Address: ")
@@ -436,10 +564,9 @@ async def handle_order_pizza(params: Dict[str, Any]):
         print("Cancelled.")
         return
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
+    # Launch or reuse a persistent browser page
+    page = await _ensure_browser(headless=False)
+    if True:
 
         # Open homepage
         await page.goto("https://www.papajohns.com/", wait_until="domcontentloaded")
@@ -460,7 +587,7 @@ async def handle_order_pizza(params: Dict[str, Any]):
         clicked = await _click_if_present(
             page,
             [
-                "role=button[name=/start\s*your\s*order/i]",
+                r"role=button[name=/start\s*your\s*order/i]",
                 "button:has-text('Start Your Order')",
                 "a:has-text('Start Your Order')",
                 "[data-testid*='start-your-order']",
@@ -480,29 +607,42 @@ async def handle_order_pizza(params: Dict[str, Any]):
         else:
             await _click_if_present(page, ["button:has-text('Carryout')", "button:has-text('Pickup')", "[data-testid*='Carryout']"])  # lenient
 
-        # Fill address
+        # Fill address: Carryout uses only ZIP, Delivery uses street + ZIP
         await asyncio.sleep(0.5)
-        await _fill_if_present(
-            page,
-            [
-                "input[aria-label*='Street' i]",
-                "input[name*='street' i]",
-                "input[placeholder*='Street' i]",
-                "label:has-text('Street') >> .. >> input",
-            ],
-            street,
-        )
-        await _fill_if_present(
-            page,
-            [
-                "input[aria-label*='ZIP' i]",
-                "input[aria-label*='Postal' i]",
-                "input[name*='zip' i]",
-                "input[name*='postal' i]",
-                "input[placeholder*='ZIP' i]",
-            ],
-            zip_code,
-        )
+        if service == "Carryout":
+            await _fill_if_present(
+                page,
+                [
+                    "input[aria-label*='ZIP' i]",
+                    "input[aria-label*='Postal' i]",
+                    "input[name*='zip' i]",
+                    "input[name*='postal' i]",
+                    "input[placeholder*='ZIP' i]",
+                ],
+                zip_code,
+            )
+        else:
+            await _fill_if_present(
+                page,
+                [
+                    "input[aria-label*='Street' i]",
+                    "input[name*='street' i]",
+                    "input[placeholder*='Street' i]",
+                    "label:has-text('Street') >> .. >> input",
+                ],
+                street,
+            )
+            await _fill_if_present(
+                page,
+                [
+                    "input[aria-label*='ZIP' i]",
+                    "input[aria-label*='Postal' i]",
+                    "input[name*='zip' i]",
+                    "input[name*='postal' i]",
+                    "input[placeholder*='ZIP' i]",
+                ],
+                zip_code,
+            )
 
         # Submit location
         submitted = await _click_if_present(
@@ -513,20 +653,20 @@ async def handle_order_pizza(params: Dict[str, Any]):
                 "button:has-text('Continue')",
                 "button:has-text('Confirm Location')",
             ],
-            timeout=6000,
+            timeout=8000,
         )
         if not submitted:
-            # Sometimes pressing Enter in ZIP might submit
+            # Sometimes pressing Enter in the last field might submit
             try:
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(1)
             except Exception:
                 pass
 
-        # If Store Closed, schedule plan-ahead; otherwise click Start Your Order to proceed
+        # Delivery: If Store Closed, schedule plan-ahead; otherwise click Start Your Order to proceed
         closed_shown = False
         try:
-            await page.wait_for_selector("text=/store\s*closed/i", timeout=4000)
+            await page.wait_for_selector(r"text=/store\s*closed/i", timeout=4000)
             closed_shown = True
         except Exception:
             closed_shown = False
@@ -536,7 +676,7 @@ async def handle_order_pizza(params: Dict[str, Any]):
             await _click_if_present(page, ["button:has-text('Start Your Order')"], timeout=6000)
         else:
             await _click_if_present(page, [
-                "role=button[name=/start\s*your\s*order/i]",
+                r"role=button[name=/start\s*your\s*order/i]",
                 "button:has-text('Start Your Order')",
                 "a:has-text('Start Your Order')",
                 "[data-testid*='start-your-order']",
@@ -570,7 +710,6 @@ async def handle_order_pizza(params: Dict[str, Any]):
         # Ask for configuration options
         size = _prompt("Size (e.g., Small/Medium/Large/XL) [Large]: ") or "Large"
         crust = _prompt("Crust (Original/Garlic Epic Stuffed/Epic Stuffed/New York Style/Thin) [Original]: ") or "Original"
-        flavor = _prompt("Crust Flavor (e.g., Garlic Parmesan, None) [None]: ") or "None"
         qty_str = _prompt("Quantity [1]: ") or "1"
         try:
             qty = max(1, int(qty_str))
@@ -604,14 +743,7 @@ async def handle_order_pizza(params: Dict[str, Any]):
             # If the chosen crust caused a warning, skip further customizations
             if await _handle_unavailable_combo(page):
                 crust_conflicted = True
-
-            if not crust_conflicted and flavor.lower() != "none":
-                try:
-                    await _select_by_label(page, ["Crust Flavour", "Crust Flavor", "Flavor"], flavor)
-                except Exception:
-                    await _choose_option_button(page, ["Crust Flavour", "Crust Flavor", "Flavor"], flavor)
-                # Dismiss if flavor caused a conflict
-                await _handle_unavailable_combo(page)
+            # No crust flavor selection to avoid issues
         else:
             print("Skipping crust customizations for Small/Medium size.")
 
@@ -633,7 +765,7 @@ async def handle_order_pizza(params: Dict[str, Any]):
         # Add to Order
         # Ensure Add button is enabled before clicking
         added = await _click_enabled(page, [
-            "role=button[name=/add\s*to\s*(order|cart)/i]",
+            r"role=button[name=/add\s*to\s*(order|cart)/i]",
             "button:has-text('Add to Order')",
             "button:has-text('Add to Cart')",
         ], timeout=8000)
@@ -648,7 +780,7 @@ async def handle_order_pizza(params: Dict[str, Any]):
             except Exception:
                 pass
             added = await _click_enabled(page, [
-                "role=button[name=/add\s*to\s*(order|cart)/i]",
+                r"role=button[name=/add\s*to\s*(order|cart)/i]",
                 "button:has-text('Add to Order')",
                 "button:has-text('Add to Cart')",
             ], timeout=6000)
@@ -661,7 +793,7 @@ async def handle_order_pizza(params: Dict[str, Any]):
         # If a 'Combination is not available' modal appears after clicking Add, dismiss and retry once
         if await _handle_unavailable_combo(page):
             added = await _click_enabled(page, [
-                "role=button[name=/add\s*to\s*(order|cart)/i]",
+                r"role=button[name=/add\s*to\s*(order|cart)/i]",
                 "button:has-text('Add to Order')",
                 "button:has-text('Add to Cart')",
             ], timeout=6000)
@@ -670,28 +802,10 @@ async def handle_order_pizza(params: Dict[str, Any]):
             await _leave_browser_open(page)
             return
 
-        # Dismiss popup modal by clicking outside or ESC
-        await asyncio.sleep(0.8)
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            try:
-                await page.mouse.click(10, 10)
-            except Exception:
-                pass
-
-        # Checkout
+        # Go directly to checkout to avoid modal identification issues
         await asyncio.sleep(0.6)
-        went_checkout = await _click_if_present(page, ["button:has-text('Checkout')", "a:has-text('Checkout')", "[aria-label*='Checkout']"], timeout=6000)
-        if went_checkout:
-            print("🧾 Reached checkout. Complete remaining details in the browser.")
-            # Keep browser open for user to interact
-            try:
-                await page.wait_for_timeout(10000)
-            except Exception:
-                pass
-        else:
-            print("⚠️ Could not navigate to checkout automatically. Please use the cart icon in the browser.")
+        await page.goto("https://www.papajohns.com/order/checkout", wait_until="domcontentloaded")
+        print("🧾 Opened checkout directly. Complete remaining details in the browser.")
 
         # Keep the browser open until the user closes it manually
         await _leave_browser_open(page)
