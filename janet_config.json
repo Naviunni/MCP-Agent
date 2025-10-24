@@ -1,0 +1,24 @@
+{
+    "mcpServers": {
+      "gmail": {
+        "command": "npx",
+        "args": ["@gongrzhe/server-gmail-autoauth-mcp"]
+      },
+      "google-calendar": {
+        "command": "npx",
+        "args": ["@cocal/google-calendar-mcp"]
+      },
+      "pdf-reader": {
+        "command": "npx",
+        "args": ["@sylphlab/pdf-reader-mcp"]
+      },
+      "Bright Data": {
+        "command": "npx",
+        "args": ["@brightdata/mcp"],
+        "env": {
+            "API_TOKEN": "your_bright_data_api_token_here"
+        }
+     }
+    }
+  }
+  
