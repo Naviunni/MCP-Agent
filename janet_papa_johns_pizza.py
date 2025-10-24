@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 from playwright.async_api import async_playwright, Page
 
@@ -27,6 +27,32 @@ async def _fill_if_present(page: Page, selectors: List[str], value: str, timeout
         except Exception:
             continue
     return False
+
+
+async def _leave_browser_open(page: Page) -> None:
+    """Keep the browser/tab open for the user until they close it manually."""
+    try:
+        print("Browser will remain open. Close the tab/window when finished.")
+        await page.wait_for_event("close")
+    except Exception:
+        pass
+
+
+def _is_large_or_above(size_text: str) -> bool:
+    """Return True if size indicates Large or bigger (e.g., Large, XL, Extra Large)."""
+    s = (size_text or "").strip().lower()
+    if not s:
+        return False
+    tokens = [s, s.replace("x-", "x").replace("extra ", "extra")]  # minor normalizations
+    checks = [
+        lambda t: "large" in t,
+        lambda t: "xl" in t,
+        lambda t: "xlarge" in t,
+        lambda t: "x large" in t,
+        lambda t: "extra large" in t,
+        lambda t: "extra-large" in t,
+    ]
+    return any(any(chk(t) for t in tokens) for chk in checks)
 
 
 async def _click_enabled(page: Page, selectors: List[str], timeout: int = 4000) -> bool:
@@ -87,6 +113,25 @@ async def _select_by_label(page: Page, label_keywords: List[str], option_text: s
             continue
 
 
+async def _handle_unavailable_combo(page: Page) -> bool:
+    """Detect and dismiss 'This Combination is not available' modal by clicking Continue/OK."""
+    try:
+        await page.wait_for_selector("text=/combination\s+is\s+not\s+available/i", timeout=1500)
+    except Exception:
+        return False
+    clicked = await _click_if_present(
+        page,
+        [
+            "button:has-text('Continue')",
+            "button:has-text('OK')",
+            "button:has-text('Ok')",
+            "button:has-text('Close')",
+        ],
+        timeout=3000,
+    )
+    await asyncio.sleep(0.3)
+    return clicked
+
 async def _choose_option_button(page: Page, keywords: List[str], value_text: str) -> bool:
     """Best-effort: click a button-like option that matches value_text and is enabled."""
     if not value_text:
@@ -107,6 +152,162 @@ async def _choose_option_button(page: Page, keywords: List[str], value_text: str
             return True
         except Exception:
             continue
+
+
+def _normalize_crust(user_input: str) -> str:
+    """Map user crust input to a canonical Papa John's label."""
+    if not user_input:
+        return "Original Crust"
+    s = user_input.strip().lower()
+    candidates = [
+        "Original Crust",
+        "Garlic Epic Stuffed Crust",
+        "Epic Stuffed Crust",
+        "New York Style Crust",
+        "Thin Crust",
+    ]
+    tokenized: List[Tuple[int, str]] = []
+    for c in candidates:
+        cl = c.lower()
+        score = 0
+        # simple token overlap score
+        for tok in s.replace("style", "style").replace("stuffeed", "stuffed").replace("tork", "york").split():
+            if tok and tok in cl:
+                score += 1
+        tokenized.append((score, c))
+    tokenized.sort(reverse=True)
+    best = tokenized[0][1] if tokenized else "Original Crust"
+    # special handling for short inputs
+    if "thin" in s:
+        return "Thin Crust"
+    if "york" in s or "ny" in s or "new york" in s:
+        return "New York Style Crust"
+    if "garlic" in s:
+        return "Garlic Epic Stuffed Crust"
+    if "stuff" in s and "garlic" not in s:
+        return "Epic Stuffed Crust"
+    if "orig" in s:
+        return "Original Crust"
+    return best
+
+
+async def _select_option_in_any_select(page: Page, option_text: str, *, prefer_numeric: bool = False, prefer_keywords: List[str] | None = None) -> bool:
+    """Scan all <select> elements and choose the option by visible label or value.
+
+    prefer_numeric: if True, prefer selects whose options look numeric (for quantity).
+    prefer_keywords: list of hint keywords like ['crust'] to favor certain selects.
+    """
+    prefer_keywords = [k.lower() for k in (prefer_keywords or [])]
+    selects = await page.locator("select").all()
+    best_match = None
+    best_rank = -1
+    option_text_l = option_text.lower()
+    for sel in selects:
+        try:
+            # quick visibility check
+            try:
+                vis = await sel.is_visible()
+                if not vis:
+                    continue
+            except Exception:
+                pass
+            aria = (await sel.get_attribute("aria-label") or "").lower()
+            name_attr = (await sel.get_attribute("name") or "").lower()
+            id_attr = (await sel.get_attribute("id") or "").lower()
+            opts = await sel.locator("option").all()
+            texts = []
+            values = []
+            numeric_count = 0
+            for o in opts:
+                t = (await o.text_content() or "").strip()
+                v = (await o.get_attribute("value") or "").strip()
+                texts.append(t)
+                values.append(v)
+                if t.isdigit():
+                    numeric_count += 1
+            if prefer_numeric and numeric_count < 2:
+                # likely not a quantity select
+                continue
+            rank = 0
+            if prefer_keywords and any(k in aria or k in name_attr or k in id_attr for k in prefer_keywords):
+                rank += 2
+            # Also boost if any option looks like crust labels
+            if not prefer_numeric and any("crust" in (t or "").lower() for t in texts):
+                rank += 1
+            # Check if the desired option exists
+            found_label = None
+            for t in texts:
+                if option_text_l in (t or "").lower():
+                    found_label = t
+                    break
+            if found_label is None:
+                for v in values:
+                    if option_text_l in (v or "").lower():
+                        found_label = v
+                        break
+            if found_label is None:
+                continue
+            if rank > best_rank:
+                best_rank = rank
+                best_match = (sel, found_label)
+        except Exception:
+            continue
+    if best_match:
+        sel, label = best_match
+        try:
+            await sel.select_option(label=label)
+        except Exception:
+            try:
+                await sel.select_option(value=label)
+            except Exception:
+                return False
+        return True
+    return False
+
+
+async def _open_combobox_and_pick(page: Page, keywords: List[str], value_text: str) -> bool:
+    """Open a combobox/button dropdown by keywords and click an option by text."""
+    kws = [k.lower() for k in keywords]
+    # Find a combobox or button with accessible name containing keyword
+    candidates = [
+        "role=combobox",
+        "role=button",
+        "button",
+        "[role='listbox']",
+    ]
+    for sel in candidates:
+        try:
+            items = await page.locator(sel).all()
+        except Exception:
+            continue
+        for it in items:
+            try:
+                name = ((await it.get_attribute("aria-label")) or "")
+                if not name:
+                    try:
+                        name = (await it.inner_text()) or ""
+                    except Exception:
+                        name = ""
+                if not any(k in name.lower() for k in kws):
+                    continue
+                try:
+                    await it.click()
+                except Exception:
+                    continue
+                # Try clicking the option in the now-open list
+                try:
+                    opt = page.get_by_role("option", name=lambda n: n and value_text.lower() in n.lower())
+                    await opt.click()
+                    return True
+                except Exception:
+                    try:
+                        await page.get_by_text(value_text, exact=False).click()
+                        return True
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+    return False
     return False
 
 
@@ -322,22 +523,26 @@ async def handle_order_pizza(params: Dict[str, Any]):
             except Exception:
                 pass
 
-        # If Store Closed, schedule plan-ahead
+        # If Store Closed, schedule plan-ahead; otherwise click Start Your Order to proceed
+        closed_shown = False
         try:
             await page.wait_for_selector("text=/store\s*closed/i", timeout=4000)
-            # found store closed message
+            closed_shown = True
+        except Exception:
+            closed_shown = False
+        if closed_shown:
             await _click_if_present(page, ["button:has-text('Schedule a plan ahead order')", "a:has-text('Schedule')"], timeout=4000)
             await _click_if_present(page, ["button:has-text('Save')", "button:has-text('Continue')"], timeout=4000)
-            await _click_if_present(page, ["button:has-text('Start Your Order')"], timeout=4000)
-        except Exception:
-            pass
+            await _click_if_present(page, ["button:has-text('Start Your Order')"], timeout=6000)
+        else:
+            await _click_if_present(page, [
+                "role=button[name=/start\s*your\s*order/i]",
+                "button:has-text('Start Your Order')",
+                "a:has-text('Start Your Order')",
+                "[data-testid*='start-your-order']",
+            ], timeout=6000)
 
-        # Wait for menu; then offer fixed choices for simplicity
-        try:
-            await page.wait_for_selector("text=/menu|most\s*popular/i", timeout=12000)
-        except Exception:
-            pass
-
+        # Go directly to selected pizza details URL for reliability
         print("Choose a pizza:")
         print("  1) Pepperoni Pizza")
         print("  2) Sausage Pizza")
@@ -348,30 +553,23 @@ async def handle_order_pizza(params: Dict[str, Any]):
         except Exception:
             idx = 1
         idx = 1 if idx not in {1,2,3} else idx
-        token_map = {1: ["pepperoni"], 2: ["sausage"], 3: ["cheese"]}
-        name_tokens = token_map[idx]
-        print(f"Opening details for: {' '.join(name_tokens).title()} ...")
-        await _open_pizza_details(page, name_tokens)
-        # Wait for a details context to be present (Size/Crust or Add button)
+        url_map = {
+            1: "https://www.papajohns.com/order/menu/pizza/pepperoni-pizza",
+            2: "https://www.papajohns.com/order/menu/pizza/sausage-pizza",
+            3: "https://www.papajohns.com/order/menu/pizza/cheese-pizza",
+        }
+        pizza_url = url_map[idx]
+        print(f"Opening: {pizza_url}")
+        await page.goto(pizza_url, wait_until="domcontentloaded")
+        # Wait for details UI to be ready
         try:
-            await page.wait_for_selector("text=/size|crust/i, button:has-text('Add to Order'), button:has-text('Add to Cart')", timeout=8000)
+            await page.wait_for_selector("text=/size|crust/i, button:has-text('Add to Order'), button:has-text('Add to Cart')", timeout=12000)
         except Exception:
-            # One more attempt to click any visible Details/Customize button
-            clicked = await _click_enabled(page, [
-                "button:has-text('Details')",
-                "a:has-text('Details')",
-                "button:has-text('Customize')",
-            ], timeout=3000)
-            if not clicked:
-                print("Couldn’t reliably open the details automatically. If it’s visible, please click Details now; I’ll continue.")
-                try:
-                    await page.wait_for_timeout(4000)
-                except Exception:
-                    pass
+            pass
 
         # Ask for configuration options
         size = _prompt("Size (e.g., Small/Medium/Large/XL) [Large]: ") or "Large"
-        crust = _prompt("Crust (e.g., Original, Thin) [Original]: ") or "Original"
+        crust = _prompt("Crust (Original/Garlic Epic Stuffed/Epic Stuffed/New York Style/Thin) [Original]: ") or "Original"
         flavor = _prompt("Crust Flavor (e.g., Garlic Parmesan, None) [None]: ") or "None"
         qty_str = _prompt("Quantity [1]: ") or "1"
         try:
@@ -381,31 +579,56 @@ async def handle_order_pizza(params: Dict[str, Any]):
 
         # Configure drop-downs / selectors
         await asyncio.sleep(0.4)
-        # Try multiple strategies; skip silently if disabled/not available
+        # First: select Size
         try:
             await _select_by_label(page, ["Size"], size)
         except Exception:
             await _choose_option_button(page, ["Size"], size)
-        try:
-            await _select_by_label(page, ["Crust"], crust)
-        except Exception:
-            await _choose_option_button(page, ["Crust"], crust)
-        if flavor.lower() != "none":
-            try:
-                await _select_by_label(page, ["Crust Flavour", "Crust Flavor", "Flavor"], flavor)
-            except Exception:
-                await _choose_option_button(page, ["Crust Flavour", "Crust Flavor", "Flavor"], flavor)
+        # Dismiss combo warning if size conflicts
+        await _handle_unavailable_combo(page)
+
+        # For Small/Medium, skip further customizations to avoid repeated 'combination not available'
+        allow_custom = _is_large_or_above(size)
+        if allow_custom:
+            # Crust can be a select or a button/combobox; normalize and try both
+            crust_norm = _normalize_crust(crust)
+            crust_conflicted = False
+            if not await _select_option_in_any_select(page, crust_norm, prefer_keywords=["crust"]):
+                try:
+                    await _select_by_label(page, ["Crust"], crust_norm)
+                except Exception:
+                    await _choose_option_button(page, ["Crust"], crust_norm)
+                    if not await _open_combobox_and_pick(page, ["Crust"], crust_norm):
+                        # last-ditch: try any select again without hints
+                        await _select_option_in_any_select(page, crust_norm)
+            # If the chosen crust caused a warning, skip further customizations
+            if await _handle_unavailable_combo(page):
+                crust_conflicted = True
+
+            if not crust_conflicted and flavor.lower() != "none":
+                try:
+                    await _select_by_label(page, ["Crust Flavour", "Crust Flavor", "Flavor"], flavor)
+                except Exception:
+                    await _choose_option_button(page, ["Crust Flavour", "Crust Flavor", "Flavor"], flavor)
+                # Dismiss if flavor caused a conflict
+                await _handle_unavailable_combo(page)
+        else:
+            print("Skipping crust customizations for Small/Medium size.")
 
         # Quantity
-        try:
-            qty_input = page.get_by_label("Quantity", exact=False)
-            await qty_input.fill(str(qty))
-        except Exception:
-            # try stepper buttons
-            for _ in range(qty - 1):
-                clicked = await _click_if_present(page, ["button[aria-label*='increase' i]", "button:has-text('+')"], timeout=800)
-                if not clicked:
-                    break
+        qty_text = str(qty)
+        # Quantity is often a dropdown without a label; try selects with numeric options first
+        if not await _select_option_in_any_select(page, qty_text, prefer_numeric=True, prefer_keywords=["qty", "quantity"]):
+            # Next, try a combobox/button near 'Qty' or 'Quantity'
+            if not await _open_combobox_and_pick(page, ["Qty", "Quantity"], qty_text):
+                # Fallback to '+' stepper clicks
+                for _ in range(qty - 1):
+                    clicked = await _click_if_present(page, ["button[aria-label*='increase' i]", "button:has-text('+')"], timeout=800)
+                    if not clicked:
+                        break
+
+        # Handle 'combination not available' warning if it popped during selection
+        await _handle_unavailable_combo(page)
 
         # Add to Order
         # Ensure Add button is enabled before clicking
@@ -435,9 +658,16 @@ async def handle_order_pizza(params: Dict[str, Any]):
                     "button:has-text('Add to Order')",
                     "button:has-text('Add to Cart')",
                 ], timeout=3000)
+        # If a 'Combination is not available' modal appears after clicking Add, dismiss and retry once
+        if await _handle_unavailable_combo(page):
+            added = await _click_enabled(page, [
+                "role=button[name=/add\s*to\s*(order|cart)/i]",
+                "button:has-text('Add to Order')",
+                "button:has-text('Add to Cart')",
+            ], timeout=6000)
         if not added:
             print("❌ Could not click Add to Order. Try choosing options directly in the browser.")
-            await browser.close()
+            await _leave_browser_open(page)
             return
 
         # Dismiss popup modal by clicking outside or ESC
@@ -463,5 +693,5 @@ async def handle_order_pizza(params: Dict[str, Any]):
         else:
             print("⚠️ Could not navigate to checkout automatically. Please use the cart icon in the browser.")
 
-        # Do not close so user can complete checkout manually
-        # await browser.close()
+        # Keep the browser open until the user closes it manually
+        await _leave_browser_open(page)
