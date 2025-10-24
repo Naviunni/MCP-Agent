@@ -30,7 +30,8 @@ from openai import AsyncOpenAI
 import re
 
 from janet_search import perform_web_search, search_session
-from janet_pizza import handle_order_pizza
+from janet_papa_johns_pizza import handle_order_pizza as handle_order_papa
+from janet_pizza import handle_order_pizza as handle_order_dominos
 
 
 
@@ -114,49 +115,10 @@ async def handle_ask_user(action_json, llm_client, context):
 
 def _build_system_prompt() -> str:
     current_date = datetime.now().strftime("%Y-%m-%d")
-    # return (
-    #     "You are Janet, a personal assistant for Navya that converts user requests into JSON tool calls for Gmail and Google Calendar MCP.\n\n"
-    #     "Supported actions: send_email, draft_email, read_email, search_emails, create_event, list_events, delete_event, read_pdf, query_pdf.\n"
-    #     f"Respond ONLY in valid JSON with no explanations. When drafting and sending emails, you may sign them as:\n\nBest, \n{SENDER_NAME}\n\n"
-    #     f"For context, today's date: {current_date}\n\n"
-    #     "For create_event: include fields summary (string), start (ISO datetime), end (ISO datetime), attendees (array), and optional location.\n"
-    #     "For list_events:\n"
-    #         " - You must always infer the correct date range from the user query.\n"
-    #         " - Output 'start_date' and 'end_date' in ISO 8601 format (e.g., '2025-10-23T00:00:00').\n"
-    #         " - If the user says 'today', 'tomorrow', 'this week', 'next week', or specifies a date or range, infer both.\n"
-    #         " - If no date is given, use the next 7 days.\n"
-    #         "Example:\n"
-    #         "User: 'What events do I have for tomorrow?'\n"
-    #         "LLM JSON:\n"
-    #         "{ \"action\": \"list_events\", \"params\": { \"start_date\": \"2025-10-24T00:00:00\", \"end_date\": \"2025-10-24T23:59:59\" } }\n"
-    #         "User: 'Show me events between Oct 25 and Oct 28'\n"
-    #         "LLM JSON:\n"
-    #         "{ \"action\": \"list_events\", \"params\": { \"start_date\": \"2025-10-25T00:00:00\", \"end_date\": \"2025-10-28T23:59:59\" } }"
-    #     "For delete_event: include id (string) or summary (string).\n"
-    #     "For send_email: include {\"to\": [emails], \"subject\": string, \"body\": string}.\n"
-    #     "For search_emails: always include a Gmail-style query string that uses fields like "
-    #     "'from:', 'to:', 'subject:', or quoted keywords. Example:\n"
-    #     "  User: check if I got a reply from alice@example.com about the meeting\n"
-    #     "  → {\"action\": \"search_emails\", \"params\": {\"query\": \"from:alice@example.com subject:meeting\"}}\n"
-    #     "For read_pdf:\n"
-    #     " - Include {\"sources\": [{\"path\": \"<file_path>\"}]}.\n"
-    #     " - Example: 'Read the pdf abc.pdf' → "
-    #     "{\"action\": \"read_pdf\", \"params\": {\"sources\": [{\"path\": \"abc.pdf\"}]}}\n"
-    #     " - If the filename or path is missing, leave it blank so the user can be asked.\n"
-    #     "For query_pdf:\n"
-    #     " - Include {\"question\": string}.\n"
-    #     " - Example: 'who is John in abc.pdf?' → "
-    #     "{\"action\": \"query_pdf\", \"params\": {\"question\": \"who is John in abc.pdf?\"}}\n"
-    #     " - The assistant should only answer questions based on PDFs that have already been read.\n\n"
 
-    #    
-    # )
-
-
-    # def _build_system_prompt() -> str:
     return (
         "You are Janet, a personal assistant for Navya that converts user requests into JSON tool calls "
-        "for Gmail, Google Calendar, PDF Reader MCP, and web search.\n\n"
+        "for Gmail, Google Calendar, PDF Reader MCP, web search and pizza ordering.\n\n"
 
         # NEW: Include 'answer' and 'ask_user'
         "Supported actions: send_email, draft_email, read_email, search_emails, create_event, "
@@ -169,9 +131,7 @@ def _build_system_prompt() -> str:
         # These prevent misrouting like your example.
         "Decision rules:\n"
         " - Use search_emails ONLY for questions that explicitly relate to the inbox/mail (e.g., 'did I get a reply', 'find email from...').\n"
-        # "   If external lookup is required and a web tool exists, ask with {\"action\":\"ask_user\",\"params\":{\"question\":\"Should I search the web?\"}}.\n"
         " - If the question is about PDFs you've already read, use query_pdf.\n"
-        # " - If key details are missing (recipient, filename, dates, etc.), use {\"action\":\"ask_user\",\"params\":{\"question\":\"<what you need>\"}}.\n\n"
 
         # ---------------- EMAIL RULES ----------------
         "For emails, DO NOT GUESS recipients. Ask clarifying question through ask_user if needed."
@@ -226,7 +186,7 @@ def _build_system_prompt() -> str:
         { "action": "ask_user", "params": { "question": "<a single clear question to remove the uncertainty>" } }'''
 
         # ---------------- PIZZA ----------------
-        "For order_pizza: start an interactive Domino's pizza ordering flow that asks for address, suggests a nearby store, optionally shows a grouped menu (pizzas, sides, drinks, desserts), collects up to 5 items, then prices the order without placing it.\n\n"
+        "For order_pizza: If the user expresses interest in ordering pizza, return JSON with order_pizza.\n\n"
     )
 
 
@@ -300,17 +260,6 @@ async def interpret_intent(user_text: str) -> Optional[Plan]:
         print(content)
         return None
 
-
-# -------------------------
-# -------------------------
-# (Email) Action Handlers are provided by janet_email
-# -------------------------
-
-
-# -------------------------
-# Interactive clarification provided by janet_email.clarify_missing_fields
-
-
 # -------------------------
 # Main loop and dispatch
 # -------------------------
@@ -331,9 +280,11 @@ async def main() -> None:
             await gmail_session.initialize()
 
             async with connect_calendar_server() as calendar_session:
-                # Uncomment to use Pizza web MCP server
-                # async with connect_pizza_server() as pizza_web_session:
-                    print("👋 Janet ready! Type a command (e.g., 'send email', 'search the web', 'read pdf story.pdf').")
+                    print(
+                        "👋 Janet ready!\n"
+                        "Capabilities: Email (send/draft/read/search), Calendar (create/list), PDF (read + Q&A), Web Search, and Pizza ordering (Papa John's by default; Domino's on request).\n"
+                        "Try: 'send email', 'list meetings tomorrow', 'read pdf shortStory1.pdf', 'search the web for …', or 'order a pizza'."
+                    )
 
                     while True:
                         text = input("\nYou (or 'quit'): ").strip()
@@ -438,7 +389,11 @@ async def main() -> None:
                         # ---------------- PIZZA----------------
                         elif action == "order_pizza":
                             try:
-                                await handle_order_pizza(params)
+                                lower = text.lower()
+                                if "domino" in lower or "domino's" in lower or "dominos" in lower:
+                                    await handle_order_dominos(params)
+                                else:
+                                    await handle_order_papa(params)
                                 #await handle_order_pizza_web(pizza_web_session, params)
                             except Exception as e:
                                 print(f"❌ Pizza assistant failed: {e}")
@@ -483,7 +438,11 @@ async def main() -> None:
                                             ollama_model=OLLAMA_MODEL,
                                         )
                                 elif action == "order_pizza":
-                                    await handle_order_pizza(params)
+                                    lower2 = text.lower()
+                                    if "domino" in lower2 or "domino's" in lower2 or "dominos" in lower2:
+                                        await handle_order_dominos(params)
+                                    else:
+                                        await handle_order_papa(params)
                                     #await handle_order_pizza_web(pizza_web_session, params)
                                 else:
                                     print("🤔 Clarification complete, but no valid follow-up action detected.")
