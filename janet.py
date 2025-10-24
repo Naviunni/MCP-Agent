@@ -331,146 +331,99 @@ async def main() -> None:
             await gmail_session.initialize()
 
             async with connect_calendar_server() as calendar_session:
-                print("👋 Janet ready! Type a command (e.g., 'send email', 'search the web', 'read pdf story.pdf').")
+                # Uncomment to use Pizza web MCP server
+                # async with connect_pizza_server() as pizza_web_session:
+                    print("👋 Janet ready! Type a command (e.g., 'send email', 'search the web', 'read pdf story.pdf').")
 
-                while True:
-                    text = input("\nYou (or 'quit'): ").strip()
-                    if text.lower() in {"quit", "exit"}:
-                        print("👋 Goodbye!")
-                        break
+                    while True:
+                        text = input("\nYou (or 'quit'): ").strip()
+                        if text.lower() in {"quit", "exit"}:
+                            print("👋 Goodbye!")
+                            break
 
-                    # Toggle model on the fly
-                    if text.lower().startswith("switch model"):
-                        global USE_OLLAMA_CORE, USE_OLLAMA_TOOLS
-                        lower = text.lower()
-                        if lower.startswith("switch model core"):
-                            USE_OLLAMA_CORE = not USE_OLLAMA_CORE
-                            print(f"🔁 Core intent now: {'Ollama' if USE_OLLAMA_CORE else 'OpenAI'}")
-                        elif lower.startswith("switch model tools"):
-                            USE_OLLAMA_TOOLS = not USE_OLLAMA_TOOLS
-                            print(f"🔁 Tools now: {'Ollama' if USE_OLLAMA_TOOLS else 'OpenAI'}")
-                        else:
-                            USE_OLLAMA_CORE = not USE_OLLAMA_CORE
-                            USE_OLLAMA_TOOLS = not USE_OLLAMA_TOOLS
-                            print(
-                                f"🔁 Core: {'Ollama' if USE_OLLAMA_CORE else 'OpenAI'}, Tools: {'Ollama' if USE_OLLAMA_TOOLS else 'OpenAI'}"
-                            )
-                        continue
-
-                    # Build system + user context for LLM
-                    context = [
-                        {"role": "system", "content": _build_system_prompt()},
-                        {"role": "user", "content": text},
-                    ]
-
-                    plan = await interpret_intent(text)
-                    if not plan:
-                        continue
-
-                    print("🧩 LLM output:", json.dumps(plan, indent=2))
-
-                    # --- If LLM couldn’t parse or flagged invalid ---
-                    if plan.get("action") == "invalid":
-                        print(f"❌ {plan.get('reason', 'I could not extract enough information.')}")
-                        continue
-
-                    # --- Email clarifications (subject, recipients) ---
-                    plan = await clarify_email(plan)
-                    if not plan:
-                        continue
-
-                    # --- Dispatch action ---
-                    action = plan.get("action", "")
-                    params = plan.get("params", {})
-
-                    # ---------------- EMAIL ----------------
-                    if action == "send_email":
-                        await handle_send_email(gmail_session, params)
-                    elif action == "search_emails":
-                        await handle_search_and_read(gmail_session, params)
-                    elif action == "read_email":
-                        await handle_read_email(gmail_session, params)
-                    elif action == "draft_email":
-                        await handle_draft_email(gmail_session, params)
-
-                    # ---------------- CALENDAR ----------------
-                    elif action == "create_event":
-                        await handle_create_event(calendar_session, params)
-                    elif action == "list_events":
-                        await handle_list_events(calendar_session, params)
-                    elif action == "delete_event":
-                        await handle_delete_event(calendar_session, params)
-
-                    # ---------------- PDF ----------------
-                    elif action == "read_pdf":
-                        async with pdf_session() as ps:
-                            await handle_read_pdfs(ps, params)
-                    elif action == "query_pdf":
-                        question = params.get("question", text)
-                        await handle_query_pdfs(
-                            question,
-                            client,
-                            use_ollama=USE_OLLAMA_TOOLS,
-                            openai_model=OPENAI_MODEL,
-                            ollama_model=OLLAMA_MODEL,
-                        )
-
-                    # ---------------- WEB SEARCH ----------------
-                    elif action == "search_web":
-                        query = params.get("query")
-                        if not query:
-                            print("❓ Missing query for web search.")
+                        # Toggle model on the fly
+                        if text.lower().startswith("switch model"):
+                            global USE_OLLAMA_CORE, USE_OLLAMA_TOOLS
+                            lower = text.lower()
+                            if lower.startswith("switch model core"):
+                                USE_OLLAMA_CORE = not USE_OLLAMA_CORE
+                                print(f"🔁 Core intent now: {'Ollama' if USE_OLLAMA_CORE else 'OpenAI'}")
+                            elif lower.startswith("switch model tools"):
+                                USE_OLLAMA_TOOLS = not USE_OLLAMA_TOOLS
+                                print(f"🔁 Tools now: {'Ollama' if USE_OLLAMA_TOOLS else 'OpenAI'}")
+                            else:
+                                USE_OLLAMA_CORE = not USE_OLLAMA_CORE
+                                USE_OLLAMA_TOOLS = not USE_OLLAMA_TOOLS
+                                print(
+                                    f"🔁 Core: {'Ollama' if USE_OLLAMA_CORE else 'OpenAI'}, Tools: {'Ollama' if USE_OLLAMA_TOOLS else 'OpenAI'}"
+                                )
                             continue
-                        try:
-                            async with search_session() as ss:
-                                await perform_web_search(
-                                    ss,
-                                    query,
-                                    use_ollama=USE_OLLAMA_TOOLS,
-                                    openai_model=OPENAI_MODEL,
-                                    ollama_model=OLLAMA_MODEL,
-                                )
-                        except Exception as e:
-                            print(f"❌ Web search failed: {e}")
 
-                    # ---------------- PIZZA ----------------
-                    elif action == "order_pizza":
-                        try:
-                            await handle_order_pizza(params)
-                        except Exception as e:
-                            print(f"❌ Pizza assistant failed: {e}")
+                        # Build system + user context for LLM
+                        context = [
+                            {"role": "system", "content": _build_system_prompt()},
+                            {"role": "user", "content": text},
+                        ]
 
-                    # ---------------- ASK USER ----------------
-                    elif action == "ask_user":
-                        new_plan = await handle_ask_user(plan, client, context)
-                        if new_plan:
-                            # 🌀 recursive continuation: feed new plan back into handler
-                            print("🔁 Continuing with clarified action...")
-                            plan = new_plan
-                            action = plan.get("action", "")
-                            params = plan.get("params", {})
-                            # Do not 'continue' here — directly re-run dispatcher
-                            # Prevents losing context due to loop reset
-                            if action == "send_email":
-                                await handle_send_email(gmail_session, params)
-                            elif action == "search_emails":
-                                await handle_search_and_read(gmail_session, params)
-                            elif action == "create_event":
-                                await handle_create_event(calendar_session, params)
-                            elif action == "read_pdf":
-                                async with pdf_session() as ps:
-                                    await handle_read_pdfs(ps, params)
-                            elif action == "query_pdf":
-                                question = params.get("question", text)
-                                await handle_query_pdfs(
-                                    question,
-                                    client,
-                                    use_ollama=USE_OLLAMA_TOOLS,
-                                    openai_model=OPENAI_MODEL,
-                                    ollama_model=OLLAMA_MODEL,
-                                )
-                            elif action == "search_web":
-                                query = params.get("query")
+                        plan = await interpret_intent(text)
+                        if not plan:
+                            continue
+
+                        print("🧩 LLM output:", json.dumps(plan, indent=2))
+
+                        # --- If LLM couldn’t parse or flagged invalid ---
+                        if plan.get("action") == "invalid":
+                            print(f"❌ {plan.get('reason', 'I could not extract enough information.')}")
+                            continue
+
+                        # --- Email clarifications (subject, recipients) ---
+                        plan = await clarify_email(plan)
+                        if not plan:
+                            continue
+
+                        # --- Dispatch action ---
+                        action = plan.get("action", "")
+                        params = plan.get("params", {})
+
+                        # ---------------- EMAIL ----------------
+                        if action == "send_email":
+                            await handle_send_email(gmail_session, params)
+                        elif action == "search_emails":
+                            await handle_search_and_read(gmail_session, params)
+                        elif action == "read_email":
+                            await handle_read_email(gmail_session, params)
+                        elif action == "draft_email":
+                            await handle_draft_email(gmail_session, params)
+
+                        # ---------------- CALENDAR ----------------
+                        elif action == "create_event":
+                            await handle_create_event(calendar_session, params)
+                        elif action == "list_events":
+                            await handle_list_events(calendar_session, params)
+                        elif action == "delete_event":
+                            await handle_delete_event(calendar_session, params)
+
+                        # ---------------- PDF ----------------
+                        elif action == "read_pdf":
+                            async with pdf_session() as ps:
+                                await handle_read_pdfs(ps, params)
+                        elif action == "query_pdf":
+                            question = params.get("question", text)
+                            await handle_query_pdfs(
+                                question,
+                                client,
+                                use_ollama=USE_OLLAMA_TOOLS,
+                                openai_model=OPENAI_MODEL,
+                                ollama_model=OLLAMA_MODEL,
+                            )
+
+                        # ---------------- WEB SEARCH ----------------
+                        elif action == "search_web":
+                            query = params.get("query")
+                            if not query:
+                                print("❓ Missing query for web search.")
+                                continue
+                            try:
                                 async with search_session() as ss:
                                     await perform_web_search(
                                         ss,
@@ -479,16 +432,67 @@ async def main() -> None:
                                         openai_model=OPENAI_MODEL,
                                         ollama_model=OLLAMA_MODEL,
                                     )
-                            elif action == "order_pizza":
-                                await handle_order_pizza(params)
-                            else:
-                                print("🤔 Clarification complete, but no valid follow-up action detected.")
-                        else:
-                            print("⚠️ Could not resolve clarification — skipping.")
+                            except Exception as e:
+                                print(f"❌ Web search failed: {e}")
 
-                    # ---------------- UNKNOWN ----------------
-                    else:
-                        print("I didn’t understand that command.")
+                        # ---------------- PIZZA----------------
+                        elif action == "order_pizza":
+                            try:
+                                await handle_order_pizza(params)
+                                #await handle_order_pizza_web(pizza_web_session, params)
+                            except Exception as e:
+                                print(f"❌ Pizza assistant failed: {e}")
+
+                        # ---------------- ASK USER ----------------
+                        elif action == "ask_user":
+                            new_plan = await handle_ask_user(plan, client, context)
+                            if new_plan:
+                                # 🌀 recursive continuation: feed new plan back into handler
+                                print("🔁 Continuing with clarified action...")
+                                plan = new_plan
+                                action = plan.get("action", "")
+                                params = plan.get("params", {})
+                                # Do not 'continue' here — directly re-run dispatcher
+                                # Prevents losing context due to loop reset
+                                if action == "send_email":
+                                    await handle_send_email(gmail_session, params)
+                                elif action == "search_emails":
+                                    await handle_search_and_read(gmail_session, params)
+                                elif action == "create_event":
+                                    await handle_create_event(calendar_session, params)
+                                elif action == "read_pdf":
+                                    async with pdf_session() as ps:
+                                        await handle_read_pdfs(ps, params)
+                                elif action == "query_pdf":
+                                    question = params.get("question", text)
+                                    await handle_query_pdfs(
+                                        question,
+                                        client,
+                                        use_ollama=USE_OLLAMA_TOOLS,
+                                        openai_model=OPENAI_MODEL,
+                                        ollama_model=OLLAMA_MODEL,
+                                    )
+                                elif action == "search_web":
+                                    query = params.get("query")
+                                    async with search_session() as ss:
+                                        await perform_web_search(
+                                            ss,
+                                            query,
+                                            use_ollama=USE_OLLAMA_TOOLS,
+                                            openai_model=OPENAI_MODEL,
+                                            ollama_model=OLLAMA_MODEL,
+                                        )
+                                elif action == "order_pizza":
+                                    await handle_order_pizza(params)
+                                    #await handle_order_pizza_web(pizza_web_session, params)
+                                else:
+                                    print("🤔 Clarification complete, but no valid follow-up action detected.")
+                            else:
+                                print("⚠️ Could not resolve clarification — skipping.")
+
+                        # ---------------- UNKNOWN ----------------
+                        else:
+                            print("I didn’t understand that command.")
 
 if __name__ == "__main__":
     asyncio.run(main())
